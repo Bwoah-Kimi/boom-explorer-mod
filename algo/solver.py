@@ -86,6 +86,28 @@ class BOOMExplorerSolver(object):
         self.model.set_eval()
 
     def eipv_suggest(self, batch: int = 1, iteration: int = 0) -> NoReturn:
+        # --- START: Candidate Sub-sampling to prevent OOM ---
+        # Define how many random candidates to evaluate.
+        # This is the most important parameter to tune for memory.
+        num_candidates = 4096  # Use 4096 random points instead of all 60k+
+
+        # Get indices of points we have already visited
+        # This is slow, but necessary to avoid re-sampling visited points.
+        # A more optimized version would use a boolean mask.
+        visited_indices = {tuple(row.tolist()) for row in self.visited_x.cpu()}
+        unevaluated_mask = [tuple(row.tolist()) not in visited_indices for row in self.problem.x.cpu()]
+        unevaluated_indices = np.where(unevaluated_mask)[0]
+
+        if len(unevaluated_indices) < num_candidates:
+            candidate_indices = unevaluated_indices
+        else:
+            candidate_indices = np.random.choice(unevaluated_indices, num_candidates, replace=False)
+        
+        # The subset of candidates to evaluate on the GPU
+        candidates = self.problem.x[candidate_indices].to(torch.float).to(self.model.device)
+        info(f"Evaluating acquisition function on {len(candidates)} random candidates (out of {len(unevaluated_indices)}).")
+        # --- END: Candidate Sub-sampling ---
+
         partitioning = NondominatedPartitioning(
             ref_point=self.problem._ref_point.to(self.model.device),
             Y=self.visited_y.to(self.model.device)
@@ -97,13 +119,20 @@ class BOOMExplorerSolver(object):
             partitioning=partitioning
         ).to(self.model.device)
 
+        # --- MODIFIED: Compute acq_val only on the candidate subset ---
         acq_val = acq_func(
             self.model.forward_mlp(
-                self.problem.x.to(torch.float).to(self.model.device)
+                candidates  # Use the smaller 'candidates' tensor
             ).unsqueeze(1).to(self.model.device)
         ).to(self.model.device)
-        top_acq_val, indices = torch.topk(acq_val, k=batch)
-        new_x = self.problem.x[indices].to(torch.float32).reshape(-1, self.problem.n_dim)
+        
+        # Find the best candidate from the SUBSET
+        top_acq_val, top_indices_in_subset = torch.topk(acq_val, k=batch)
+        
+        # Map the subset indices back to the original problem.x indices
+        original_indices = torch.tensor(candidate_indices[top_indices_in_subset.cpu().numpy()])
+
+        new_x = self.problem.x[original_indices.cpu()].to(torch.float32).reshape(-1, self.problem.n_dim)
         new_y = self.problem.evaluate_true(new_x).unsqueeze(0)
         
         self.visited_x = torch.cat((self.visited_x, new_x), 0)
