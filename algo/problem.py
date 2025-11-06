@@ -9,7 +9,15 @@ from abc import ABC, abstractmethod
 from vlsi_flow.manager import vlsi_flow
 from vlsi_flow.vlsi_report import get_report
 from typing import List, Optional, Tuple, NoReturn
-from dataset import load_dataset, ndarray_to_tensor
+from dataset import ndarray_to_tensor
+# Import custom dataset for your chiplet design space
+try:
+    from custom_dataset import load_dataset as load_custom_dataset
+    USE_CUSTOM_DATASET = True
+except ImportError:
+    from dataset import load_dataset
+    USE_CUSTOM_DATASET = False
+    load_custom_dataset = load_dataset
 from design_space.boom_design_space import parse_boom_design_space
 
 
@@ -123,10 +131,20 @@ class DesignSpaceProblem(MultiObjectiveProblem):
         super().__init__()
 
     def load_dataset(self) -> NoReturn:
-        x, y = load_dataset(self.configs["dataset"]["path"])
+        # Load dataset - will use custom_dataset.py if available
+        x, y = load_custom_dataset(self.configs["dataset"]["path"])
         self.total_x = ndarray_to_tensor(x)
-        self.total_y = ndarray_to_tensor(y[:, :-1])
-        self.time = ndarray_to_tensor(y[:, -1])
+        
+        # Handle 2 or 3 objectives
+        if y.shape[1] == 3:
+            # Original BOOM format: [perf, power, time]
+            self.total_y = ndarray_to_tensor(y[:, :-1])
+            self.time = ndarray_to_tensor(y[:, -1])
+        else:
+            # Custom dataset format: [cycles, cost] - no time column
+            self.total_y = ndarray_to_tensor(y)
+            self.time = None
+        
         self.x = self.total_x.clone()
         self.y = self.total_y.clone()
         self.n_dim = self.x.shape[-1]

@@ -328,7 +328,8 @@ class DKLGP(object):
         return y
 
     def forward_mlp(self, x: torch.Tensor) -> torch.Tensor:
-        x = x.to(self.device)
+        # x = x.to(self.device)
+        x = x.to(self.mlp[0].weight.device)
         x = self.mlp(x)
         # normalization
         x = x - x.min(0)[0]

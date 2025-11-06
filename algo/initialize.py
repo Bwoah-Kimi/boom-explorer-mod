@@ -200,7 +200,23 @@ class MicroAL(RandomizedTED):
 
 def micro_al(problem: DesignSpaceProblem):
     initializer = MicroAL(problem)
-    x = ndarray_to_tensor(initializer.initialize(problem.x.numpy()))
+    
+    # Get subsample size from config (if specified)
+    subsample_size = initializer.configs.get("subsample-size", None)
+    dataset = problem.x.numpy()
+    
+    # Subsample for faster initialization on large datasets
+    if subsample_size is not None and subsample_size < len(dataset):
+        print(f"[MicroAL] Subsampling {subsample_size} from {len(dataset)} designs for initialization")
+        # Random subsample
+        indices = np.random.choice(len(dataset), size=subsample_size, replace=False)
+        dataset_subsample = dataset[indices]
+    else:
+        print(f"[MicroAL] Using full dataset ({len(dataset)} designs) for initialization")
+        dataset_subsample = dataset
+    
+    # Run MicroAL on subsample
+    x = ndarray_to_tensor(initializer.initialize(dataset_subsample))
     y = problem.evaluate_true(x)
     problem.remove_sampled_data(x)
     return x, y

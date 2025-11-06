@@ -8,7 +8,14 @@ import gpytorch
 import numpy as np
 from typing import NoReturn
 from initialize import micro_al
-from dataset import rescale_dataset
+# Import custom rescaling if available
+try:
+    from custom_dataset import rescale_dataset as rescale_custom
+    USE_CUSTOM_RESCALE = True
+except ImportError:
+    from dataset import rescale_dataset
+    USE_CUSTOM_RESCALE = False
+    rescale_custom = rescale_dataset
 from model import initialize_dkl_gp
 from visualize import plot_pareto_set
 from problem import DesignSpaceProblem
@@ -103,8 +110,20 @@ class BOOMExplorerSolver(object):
         pred = get_pareto_frontier(self.visited_y, reverse=False)
         self.adrs.append(calc_adrs(gt, pred))
         optimal_solution = get_pareto_optimal_solutions(self.visited_x, self.visited_y)
+        
+        # Use custom rescaling if available
+        rescale_func = rescale_custom if USE_CUSTOM_RESCALE else rescale_dataset
+        
+        # Determine indices based on number of objectives
+        if pred.shape[1] == 2:
+            # Custom dataset: 2 objectives (cycles, cost)
+            pred_rescaled = rescale_func(pred, cycles_idx=-2, cost_idx=-1)
+        else:
+            # Original BOOM: 3 objectives (perf, power, time)
+            pred_rescaled = rescale_func(pred, perf_idx=-2, power_idx=-1)
+        
         info("pareto set: {}, size: {}, ADRS: {}".format(
-                str(rescale_dataset(pred, perf_idx=-2, power_idx=-1)),
+                str(pred_rescaled),
                 len(pred),
                 self.adrs[-1]
             )
@@ -113,8 +132,8 @@ class BOOMExplorerSolver(object):
         mkdir(p)
 
         plot_pareto_set(
-            rescale_dataset(pred),
-            gt=rescale_dataset(gt),
+            rescale_func(pred) if pred.shape[1] == 2 else rescale_dataset(pred),
+            gt=rescale_func(gt) if gt.shape[1] == 2 else rescale_dataset(gt),
             design_space=self.problem.configs["dataset"]["path"],
             output=os.path.join(p, "report.pdf")
         )
