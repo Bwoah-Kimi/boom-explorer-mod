@@ -2,10 +2,12 @@
 
 
 import os
+import json
 import tqdm
 import torch
 import gpytorch
 import numpy as np
+from datetime import datetime
 from typing import NoReturn
 from initialize import micro_al
 # Import custom rescaling if available
@@ -21,6 +23,7 @@ from visualize import plot_pareto_set
 from problem import DesignSpaceProblem
 from utils import assert_error, info, mkdir, write_txt
 from metric import calc_adrs, get_pareto_frontier, get_pareto_optimal_solutions
+from design_space_decoder import decode_design_vector, get_design_space_dict
 from botorch.acquisition.multi_objective.analytic import ExpectedHypervolumeImprovement
 from botorch.utils.multi_objective.box_decompositions.non_dominated import NondominatedPartitioning
 
@@ -29,6 +32,8 @@ class BOOMExplorerSolver(object):
     def __init__(self, problem: object):
         super(BOOMExplorerSolver, self).__init__()
         self.problem = problem
+        self.iteration_results = []
+        self.start_timestamp = datetime.now().isoformat()
         
     def initialize(self) -> NoReturn:
         # Microarctecture-aware active learning
@@ -39,6 +44,8 @@ class BOOMExplorerSolver(object):
                 get_pareto_frontier(self.visited_y, reverse=False)
             )
         )
+        # Log initial samples from MicroAL (iteration 0)
+        self.log_iteration(self.visited_x, self.visited_y, iteration=0)
 
     def set_optimizer(self) -> torch.optim.Adam:
         parameters = [
@@ -78,7 +85,7 @@ class BOOMExplorerSolver(object):
             iterator.set_postfix(loss=loss.item())
         self.model.set_eval()
 
-    def eipv_suggest(self, batch: int = 1) -> NoReturn:
+    def eipv_suggest(self, batch: int = 1, iteration: int = 0) -> NoReturn:
         partitioning = NondominatedPartitioning(
             ref_point=self.problem._ref_point.to(self.model.device),
             Y=self.visited_y.to(self.model.device)
@@ -97,13 +104,75 @@ class BOOMExplorerSolver(object):
         ).to(self.model.device)
         top_acq_val, indices = torch.topk(acq_val, k=batch)
         new_x = self.problem.x[indices].to(torch.float32).reshape(-1, self.problem.n_dim)
+        new_y = self.problem.evaluate_true(new_x).unsqueeze(0)
+        
         self.visited_x = torch.cat((self.visited_x, new_x), 0)
-        self.visited_y = torch.cat((
-                self.visited_y,
-                self.problem.evaluate_true(new_x).unsqueeze(0)
-            ),
-            0
-        )
+        self.visited_y = torch.cat((self.visited_y, new_y), 0)
+        
+        # Log this iteration
+        self.log_iteration(new_x, new_y, iteration)
+
+    def log_iteration(self, new_x: torch.Tensor, new_y: torch.Tensor, iteration: int) -> NoReturn:
+        """
+        Log iteration results for JSON export.
+        
+        Args:
+            new_x: Encoded design vector(s) sampled in this iteration
+            new_y: Scaled objective values for the sampled design(s)
+            iteration: Current iteration number
+        """
+        # Use custom rescaling if available
+        rescale_func = rescale_custom if USE_CUSTOM_RESCALE else rescale_dataset
+        
+        # Handle batch sampling (new_x might have multiple rows)
+        if new_x.dim() == 1:
+            new_x = new_x.unsqueeze(0)
+        if new_y.dim() == 1:
+            new_y = new_y.unsqueeze(0)
+        
+        # Log each sampled design
+        for i in range(new_x.shape[0]):
+            # Decode design parameters
+            dse_config = decode_design_vector(new_x[i])
+            
+            # Unscale objectives (convert back to original values)
+            objectives_unscaled = rescale_func(new_y[i].cpu().numpy(), cycles_idx=0, cost_idx=1)
+            
+            # Create iteration result entry
+            iteration_entry = {
+                "iteration": iteration,
+                "timestamp": datetime.now().isoformat(),
+                "dse_config": dse_config,
+                "objectives": objectives_unscaled.tolist() if isinstance(objectives_unscaled, np.ndarray) else list(objectives_unscaled)
+            }
+            
+            self.iteration_results.append(iteration_entry)
+    
+    def save_json(self, output_path: str) -> NoReturn:
+        """
+        Save all iteration results to JSON file.
+        
+        Args:
+            output_path: Path to output JSON file
+        """
+        json_data = {
+            "dse_start_timestamp": self.start_timestamp,
+            "design_space": get_design_space_dict(),
+            "optimizer_type": "BOOM-Explorer",
+            "sampling_algo": "MicroAL + DKL-GP + EHVI",
+            "misc_info": {
+                "max_bo_steps": self.problem.configs["bo"]["max-bo-steps"],
+                "mlp_output_dim": self.problem.configs["dkl-gp"]["mlp-output-dim"],
+                "total_samples": len(self.iteration_results),
+                "dataset_path": self.problem.configs["dataset"]["path"]
+            },
+            "iteration_results": self.iteration_results
+        }
+        
+        with open(output_path, 'w') as f:
+            json.dump(json_data, f, indent=2)
+        
+        info(f"Saved {len(self.iteration_results)} iteration results to {output_path}")
 
     def report(self):
         gt = get_pareto_frontier(self.problem.total_y, reverse=False)
@@ -165,6 +234,13 @@ class BOOMExplorerSolver(object):
             os.path.join(
                 p,
                 "dkl-gp.mdl"
+            )
+        )
+        # Save iteration results as JSON
+        self.save_json(
+            os.path.join(
+                p,
+                "iteration_results.json"
             )
         )
 
